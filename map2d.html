@@ -99,7 +99,7 @@
 
 <p id="status"></p>
 
-<div class="controls-hint">Di chuyển: A / D hoặc ← / →</div>
+<div class="controls-hint">Di chuyển: A / D hoặc ← / → · Nhảy: W hoặc ↑</div>
 
 <button id="btnLeave">Rời Bí Cảnh</button>
 
@@ -134,6 +134,12 @@
 
   const keys = {};
 
+  /* ================= MULTIPLAYER STATE ================= */
+  let otherPlayers = {};
+  const SYNC_INTERVAL = 2000;
+  const STALE_TIMEOUT = 10000;
+  let syncInProgress = false;
+
   /* ================= ASSET LOADING ================= */
   let idleFrames = [];
   let moveFrames = [];
@@ -150,14 +156,14 @@
     let img = new Image();
     img.onload = onSpriteLoad;
     img.onerror = onSpriteLoad;
-    img.src = './ActorA_idle_' + i + '.png';
+    img.src = new URL('/ActorA_idle_' + i + '.png', import.meta.url).href;
     idleFrames.push(img);
   }
   for (let i = 1; i <= 8; i++) {
     let img = new Image();
     img.onload = onSpriteLoad;
     img.onerror = onSpriteLoad;
-    img.src = './ActorA_move_' + i + '.png';
+    img.src = new URL('/ActorA_move_' + i + '.png', import.meta.url).href;
     moveFrames.push(img);
   }
 
@@ -246,6 +252,7 @@
       allBinData.players[myPlayerId] = allBinData.players[myPlayerId] || {};
       allBinData.players[myPlayerId].bicanhX = Math.round(player.x);
       allBinData.players[myPlayerId].bicanhY = Math.round(player.y);
+      allBinData.players[myPlayerId].bicanhLastSeen = 0;
 
       const res = await fetchWithTimeout(JSONBIN_BASE, {
         method: 'PUT',
@@ -267,6 +274,69 @@
     setTimeout(function() {
       window.location.href = 'index.html';
     }, 300);
+  }
+
+  /* ================= MULTIPLAYER SYNC ================= */
+  async function syncWithServer() {
+    if (!myPlayerId || syncInProgress) return;
+    syncInProgress = true;
+
+    try {
+      var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
+        method: 'GET',
+        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+      }, 8000);
+      if (!res.ok) { syncInProgress = false; return; }
+
+      var data = await res.json();
+      var record = (data && typeof data === 'object' && 'record' in data && 'metadata' in data) ? data.record : data;
+      if (!record || typeof record !== 'object' || Array.isArray(record)) { syncInProgress = false; return; }
+
+      allBinData = record;
+      allBinData.players = allBinData.players || {};
+
+      var now = Date.now();
+
+      var newOthers = {};
+      for (var pid in allBinData.players) {
+        if (pid === myPlayerId) continue;
+        var p = allBinData.players[pid];
+        if (!p || typeof p.bicanhX !== 'number' || typeof p.bicanhY !== 'number') continue;
+        var lastSeen = p.bicanhLastSeen || 0;
+        if (lastSeen > 0 && now - lastSeen > STALE_TIMEOUT) continue;
+
+        var existing = otherPlayers[pid];
+        newOthers[pid] = {
+          x: p.bicanhX,
+          y: p.bicanhY,
+          facingLeft: !!p.bicanhFacingLeft,
+          isMoving: !!p.bicanhMoving,
+          name: p.name || 'Vô Danh',
+          lastSeen: lastSeen,
+          frameIndex: existing ? existing.frameIndex : 0,
+          frameTimer: existing ? existing.frameTimer : 0,
+          currentFrames: existing ? existing.currentFrames : idleFrames
+        };
+      }
+      otherPlayers = newOthers;
+
+      allBinData.players[myPlayerId] = allBinData.players[myPlayerId] || {};
+      allBinData.players[myPlayerId].bicanhX = Math.round(player.x);
+      allBinData.players[myPlayerId].bicanhY = Math.round(player.y);
+      allBinData.players[myPlayerId].bicanhFacingLeft = player.facingLeft;
+      allBinData.players[myPlayerId].bicanhMoving = player.isMoving;
+      allBinData.players[myPlayerId].bicanhLastSeen = now;
+
+      await fetchWithTimeout(JSONBIN_BASE, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+        body: JSON.stringify(allBinData)
+      }, 8000);
+    } catch (err) {
+      console.error('syncWithServer error:', err);
+    }
+
+    syncInProgress = false;
   }
 
   /* ================= STATUS DISPLAY ================= */
@@ -366,8 +436,6 @@
     if (cameraX < 0) cameraX = 0;
     if (cameraX > MAP_WIDTH - canvas.width) cameraX = MAP_WIDTH - canvas.width;
 
-    var groundScreenX = -cameraX;
-
     ctx.fillStyle = '#1a1a2a';
     ctx.fillRect(0, GROUND_Y + SPRITE_H - 20, canvas.width, canvas.height - (GROUND_Y + SPRITE_H - 20));
 
@@ -413,6 +481,59 @@
     return cameraX;
   }
 
+  function drawNameLabel(drawX, drawY, name, color) {
+    ctx.textAlign = 'center';
+    ctx.font = '11px Courier New';
+    var textW = ctx.measureText(name).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(drawX + SPRITE_W / 2 - textW / 2 - 4, drawY - 18, textW + 8, 16);
+    ctx.fillStyle = color || '#e8c27a';
+    ctx.fillText(name, drawX + SPRITE_W / 2, drawY - 6);
+    ctx.textAlign = 'left';
+  }
+
+  function drawOtherPlayers(cameraX) {
+    for (var pid in otherPlayers) {
+      var p = otherPlayers[pid];
+
+      var targetFrames = p.isMoving ? moveFrames : idleFrames;
+      if (p.currentFrames !== targetFrames) {
+        p.currentFrames = targetFrames;
+        p.frameIndex = 0;
+        p.frameTimer = 0;
+      }
+      p.frameTimer++;
+      if (p.frameTimer >= frameInterval) {
+        p.frameTimer = 0;
+        p.frameIndex = (p.frameIndex + 1) % p.currentFrames.length;
+      }
+
+      var drawX = p.x - cameraX;
+      var drawY = p.y;
+
+      if (drawX < -SPRITE_W || drawX > canvas.width) continue;
+
+      drawNameLabel(drawX, drawY, p.name, '#8a9aca');
+
+      var frame = p.currentFrames[p.frameIndex];
+      if (frame && frame.complete && frame.naturalWidth > 0) {
+        if (p.facingLeft) {
+          ctx.save();
+          ctx.translate(drawX + SPRITE_W, drawY);
+          ctx.scale(-1, 1);
+          ctx.drawImage(frame, 0, 0, SPRITE_W, SPRITE_H);
+          ctx.restore();
+        } else {
+          ctx.drawImage(frame, drawX, drawY, SPRITE_W, SPRITE_H);
+        }
+      } else {
+        ctx.strokeStyle = '#666666';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(drawX, drawY, SPRITE_W, SPRITE_H);
+      }
+    }
+  }
+
   function drawPlayer(cameraX) {
     var drawX = player.x - cameraX;
     var drawY = player.y;
@@ -433,17 +554,23 @@
       ctx.lineWidth = 2;
       ctx.strokeRect(drawX, drawY, SPRITE_W, SPRITE_H);
     }
+
+    if (playerData && playerData.name) {
+      drawNameLabel(drawX, drawY, playerData.name, '#e8c27a');
+    }
   }
 
   function drawHUD(cameraX) {
     ctx.fillStyle = 'rgba(200,200,200,0.5)';
     ctx.font = '12px Courier New';
     ctx.fillText('Vị trí: ' + Math.round(player.x) + ', ' + Math.round(player.y), 10, 18);
+    ctx.fillText('Đạo hữu online: ' + (Object.keys(otherPlayers).length + 1), 10, 34);
     ctx.fillText('Bí Cảnh - Cửa vào không gian cổ xưa', 10, canvas.height - 10);
   }
 
   function render() {
     var cameraX = drawBackground();
+    drawOtherPlayers(cameraX);
     drawPlayer(cameraX);
     drawHUD(cameraX);
   }
@@ -460,7 +587,11 @@
   });
 
   function tryStartGame() {
-    if (playerData && spritesReady) gameLoop();
+    if (playerData && spritesReady) {
+      gameLoop();
+      syncWithServer();
+      setInterval(syncWithServer, SYNC_INTERVAL);
+    }
   }
 
   window.onload = function() {
