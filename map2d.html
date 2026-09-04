@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bí Cảnh - Tu Tiên Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #111;
+    color: #c8c8c8;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  #gameCanvas {
+    border: 2px solid #333;
+    background: #111;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 20px rgba(232,194,122,0.15);
+  }
+
+  #status {
+    margin-top: 12px;
+    font-size: 14px;
+    color: #888;
+    text-align: center;
+    min-height: 20px;
+  }
+
+  #status .player-name {
+    color: #e8c27a;
+    font-weight: bold;
+  }
+
+  #status .stat-line {
+    color: #6a9a8a;
+    margin-top: 4px;
+  }
+
+  #btnLeave {
+    margin-top: 16px;
+    padding: 10px 28px;
+    font-size: 15px;
+    font-family: 'Courier New', monospace;
+    background: #2a1a1a;
+    color: #e8c27a;
+    border: 1px solid #5a3a2a;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+
+  #btnLeave:hover {
+    background: #3a2a2a;
+    border-color: #8a5a3a;
+  }
+
+  #btnLeave:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  #loadingOverlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: #111;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    color: #555;
+    font-size: 18px;
+  }
+
+  #loadingOverlay.hidden {
+    display: none;
+  }
+
+  .controls-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #444;
+  }
+</style>
+</head>
+<body>
+
+<div id="loadingOverlay">Đang kết nối Vân Đài Ký Sự...</div>
+
+<canvas id="gameCanvas" width="800" height="400"></canvas>
+
+<p id="status"></p>
+
+<div class="controls-hint">Di chuyển: A / D hoặc ← / →</div>
+
+<button id="btnLeave">Rời Bí Cảnh</button>
+
+<script type="module">
+(function(){
+  'use strict';
+
+  /* ================= JSONBin CONFIG ================= */
+  const JSONBIN_API_KEY = "$2a$10$I0dCIJa0Pmh.y8pZkIFYkOgQz4E5yBcv7gNR19WOBs1u2s7.oxRkO";
+  const JSONBIN_BIN_ID = "6a89525fda38895dfe02bb7f";
+  const JSONBIN_BASE = "https://api.jsonbin.io/v3/b/" + JSONBIN_BIN_ID;
+
+  /* ================= GAME STATE ================= */
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const btnLeave = document.getElementById('btnLeave');
+  const loadingOverlay = document.getElementById('loadingOverlay');
+
+  let myPlayerId = null;
+  let playerData = null;
+  let allBinData = null;
+
+  const player = {
+    x: 100,
+    y: 280,
+    speed: 3,
+    facingLeft: false,
+    isMoving: false,
+    mapX: 0
+  };
+
+  const keys = {};
+
+  /* ================= ASSET LOADING ================= */
+  let idleFrames = [];
+  let moveFrames = [];
+  let loadedCount = 0;
+  const TOTAL_SPRITES = 16;
+  let spritesReady = false;
+
+  function onSpriteLoad() {
+    loadedCount++;
+    if (loadedCount >= TOTAL_SPRITES) spritesReady = true;
+  }
+
+  for (let i = 1; i <= 8; i++) {
+    let img = new Image();
+    img.onload = onSpriteLoad;
+    img.onerror = onSpriteLoad;
+    img.src = new URL('/ActorA_idle_' + i + '.png', import.meta.url).href;
+    idleFrames.push(img);
+  }
+  for (let i = 1; i <= 8; i++) {
+    let img = new Image();
+    img.onload = onSpriteLoad;
+    img.onerror = onSpriteLoad;
+    img.src = new URL('/ActorA_move_' + i + '.png', import.meta.url).href;
+    moveFrames.push(img);
+  }
+
+  /* ================= ANIMATION STATE MACHINE ================= */
+  let currentFrames = idleFrames;
+  let frameIndex = 0;
+  let frameTimer = 0;
+  const frameInterval = 7;
+
+  const SPRITE_SCALE = 2;
+  const SPRITE_W = 48 * SPRITE_SCALE;
+  const SPRITE_H = 48 * SPRITE_SCALE;
+
+  const GROUND_Y = 280;
+  const MAP_WIDTH = 2400;
+  const GRAVITY = 0.8;
+  const JUMP_FORCE = -14;
+  let velocityY = 0;
+  let isGrounded = true;
+
+  /* ================= JSONBIN FUNCTIONS ================= */
+  function fetchWithTimeout(url, options, timeoutMs) {
+    timeoutMs = timeoutMs || 8000;
+    return Promise.race([
+      fetch(url, options),
+      new Promise(function(_, reject) {
+        setTimeout(function() { reject(new Error('timeout')); }, timeoutMs);
+      })
+    ]);
+  }
+
+  async function loadPlayerData() {
+    const params = new URLSearchParams(window.location.search);
+    myPlayerId = params.get('pid') || '';
+
+    if (!myPlayerId) {
+      loadingOverlay.textContent = 'Không tìm thấy Mã Đạo Hữu. Vui lòng quay lại từ game chính.';
+      return;
+    }
+
+    try {
+      const res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
+        method: 'GET',
+        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+      }, 8000);
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      const data = await res.json();
+      const record = (data && typeof data === 'object' && 'record' in data && 'metadata' in data) ? data.record : data;
+
+      if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        loadingOverlay.textContent = 'Dữ liệu máy chủ không hợp lệ.';
+        return;
+      }
+
+      allBinData = record;
+      allBinData.players = allBinData.players || {};
+
+      const snap = allBinData.players[myPlayerId];
+      if (!snap) {
+        loadingOverlay.textContent = 'Không tìm thấy đạo hữu với mã "' + myPlayerId + '".';
+        return;
+      }
+
+      playerData = snap;
+
+      if (typeof snap.bicanhX === 'number') player.x = snap.bicanhX;
+      if (typeof snap.bicanhY === 'number') player.y = snap.bicanhY;
+
+      loadingOverlay.classList.add('hidden');
+      updateStatusDisplay();
+    } catch (err) {
+      loadingOverlay.textContent = 'Lỗi kết nối Vân Đài Ký Sự: ' + (err && err.message);
+    }
+  }
+
+  async function savePlayerData() {
+    if (!myPlayerId || !allBinData) return;
+
+    btnLeave.disabled = true;
+    btnLeave.textContent = 'Đang lưu...';
+
+    try {
+      allBinData.players = allBinData.players || {};
+      allBinData.players[myPlayerId] = allBinData.players[myPlayerId] || {};
+      allBinData.players[myPlayerId].bicanhX = Math.round(player.x);
+      allBinData.players[myPlayerId].bicanhY = Math.round(player.y);
+
+      const res = await fetchWithTimeout(JSONBIN_BASE, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+        body: JSON.stringify(allBinData),
+        keepalive: true
+      }, 8000);
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      btnLeave.textContent = 'Đã lưu!';
+    } catch (err) {
+      btnLeave.textContent = 'Lỗi lưu!';
+      btnLeave.disabled = false;
+      console.error('savePlayerData error:', err);
+      return;
+    }
+
+    setTimeout(function() {
+      window.location.href = 'index.html';
+    }, 300);
+  }
+
+  /* ================= STATUS DISPLAY ================= */
+  function updateStatusDisplay() {
+    if (!playerData) {
+      statusEl.innerHTML = '';
+      return;
+    }
+
+    var name = playerData.name || 'Vô Danh';
+    var realmIdx = playerData.realmIdx || 0;
+    var subIdx = playerData.subIdx || 0;
+    var tang = playerData.tang || 1;
+    var cp = playerData.combatPower || playerData.power || 0;
+    var hp = playerData.hp || 0;
+    var atk = playerData.atk || 0;
+    var def = playerData.def || 0;
+
+    var realmNames = [
+      'Luyện Khí', 'Trúc Cơ', 'Kim Đan', 'Nguyên Anh',
+      'Hóa Thần', 'Luyện Hư', 'Hợp Thể', 'Đại Thừa',
+      'Độ Kiếp', 'Tiên Nhân'
+    ];
+    var subNames = ['Sơ Kỳ', 'Trung Kỳ', 'Hậu Kỳ', 'Viên Mãn'];
+
+    var realmName = (realmNames[realmIdx] || 'Luyện Khí') + ' - ' + (subNames[subIdx] || 'Sơ Kỳ') + ' T' + tang;
+
+    statusEl.innerHTML =
+      '<span class="player-name">' + name + '</span>' +
+      '<br><span class="stat-line">' + realmName + ' · Lực Chiến: ' + cp + ' · HP: ' + hp + ' · ATK: ' + atk + ' · DEF: ' + def + '</span>';
+  }
+
+  /* ================= INPUT HANDLING ================= */
+  document.addEventListener('keydown', function(e) {
+    var key = e.key.toLowerCase();
+    keys[key] = true;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+      e.preventDefault();
+    }
+    if ((key === 'w' || e.key === 'ArrowUp') && isGrounded) {
+      velocityY = JUMP_FORCE;
+      isGrounded = false;
+    }
+  });
+
+  document.addEventListener('keyup', function(e) {
+    keys[e.key.toLowerCase()] = false;
+  });
+
+  /* ================= GAME LOOP ================= */
+  function update() {
+    var moving = false;
+
+    if (keys['a'] || keys['arrowleft']) {
+      player.x -= player.speed;
+      player.facingLeft = true;
+      moving = true;
+    }
+    if (keys['d'] || keys['arrowright']) {
+      player.x += player.speed;
+      player.facingLeft = false;
+      moving = true;
+    }
+
+    player.isMoving = moving;
+
+    if (player.x < 0) player.x = 0;
+    if (player.x > MAP_WIDTH - SPRITE_W) player.x = MAP_WIDTH - SPRITE_W;
+
+    velocityY += GRAVITY;
+    player.y += velocityY;
+
+    if (player.y >= GROUND_Y) {
+      player.y = GROUND_Y;
+      velocityY = 0;
+      isGrounded = true;
+    }
+
+    if (moving) {
+      if (currentFrames !== moveFrames) { currentFrames = moveFrames; frameIndex = 0; frameTimer = 0; }
+    } else {
+      if (currentFrames !== idleFrames) { currentFrames = idleFrames; frameIndex = 0; frameTimer = 0; }
+    }
+
+    frameTimer++;
+    if (frameTimer >= frameInterval) {
+      frameTimer = 0;
+      frameIndex = (frameIndex + 1) % currentFrames.length;
+    }
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    var cameraX = player.x - canvas.width / 2 + SPRITE_W / 2;
+    if (cameraX < 0) cameraX = 0;
+    if (cameraX > MAP_WIDTH - canvas.width) cameraX = MAP_WIDTH - canvas.width;
+
+    var groundScreenX = -cameraX;
+
+    ctx.fillStyle = '#1a1a2a';
+    ctx.fillRect(0, GROUND_Y + SPRITE_H - 20, canvas.width, canvas.height - (GROUND_Y + SPRITE_H - 20));
+
+    ctx.strokeStyle = '#2a2a3a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, GROUND_Y + SPRITE_H - 20);
+    ctx.lineTo(canvas.width, GROUND_Y + SPRITE_H - 20);
+    ctx.stroke();
+
+    for (var i = 0; i < 40; i++) {
+      var starX = (i * 137) % canvas.width;
+      var starY = (i * 73) % (GROUND_Y + SPRITE_H - 30);
+      var alpha = 0.3 + 0.2 * Math.sin(Date.now() / 1000 + i);
+      ctx.fillStyle = 'rgba(200,200,220,' + alpha + ')';
+      ctx.fillRect(starX, starY, 1, 1);
+    }
+
+    for (var m = 0; m < 5; m++) {
+      var mx = ((m * 500 - cameraX * 0.3) % (MAP_WIDTH + 200)) - 100;
+      if (mx < -200) mx += MAP_WIDTH + 400;
+      ctx.fillStyle = 'rgba(30,30,50,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(mx, GROUND_Y + SPRITE_H - 20);
+      ctx.lineTo(mx + 80, GROUND_Y + SPRITE_H - 80);
+      ctx.lineTo(mx + 160, GROUND_Y + SPRITE_H - 20);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    for (var t = 0; t < 20; t++) {
+      var tx = t * 120 - cameraX;
+      if (tx > -50 && tx < canvas.width + 50) {
+        ctx.fillStyle = '#1a2a1a';
+        ctx.fillRect(tx + 8, GROUND_Y + SPRITE_H - 35, 4, 15);
+        ctx.fillStyle = '#2a3a2a';
+        ctx.beginPath();
+        ctx.arc(tx + 10, GROUND_Y + SPRITE_H - 38, 8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    return cameraX;
+  }
+
+  function drawPlayer(cameraX) {
+    var drawX = player.x - cameraX;
+    var drawY = player.y;
+    var frame = currentFrames[frameIndex];
+
+    if (frame && frame.complete && frame.naturalWidth > 0) {
+      if (player.facingLeft) {
+        ctx.save();
+        ctx.translate(drawX + SPRITE_W, drawY);
+        ctx.scale(-1, 1);
+        ctx.drawImage(frame, 0, 0, SPRITE_W, SPRITE_H);
+        ctx.restore();
+      } else {
+        ctx.drawImage(frame, drawX, drawY, SPRITE_W, SPRITE_H);
+      }
+    } else {
+      ctx.strokeStyle = '#ff3333';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(drawX, drawY, SPRITE_W, SPRITE_H);
+    }
+  }
+
+  function drawHUD(cameraX) {
+    ctx.fillStyle = 'rgba(200,200,200,0.5)';
+    ctx.font = '12px Courier New';
+    ctx.fillText('Vị trí: ' + Math.round(player.x) + ', ' + Math.round(player.y), 10, 18);
+    ctx.fillText('Bí Cảnh - Cửa vào không gian cổ xưa', 10, canvas.height - 10);
+  }
+
+  function render() {
+    var cameraX = drawBackground();
+    drawPlayer(cameraX);
+    drawHUD(cameraX);
+  }
+
+  function gameLoop() {
+    update();
+    render();
+    requestAnimationFrame(gameLoop);
+  }
+
+  /* ================= INIT ================= */
+  btnLeave.addEventListener('click', function() {
+    savePlayerData();
+  });
+
+  function tryStartGame() {
+    if (playerData && spritesReady) gameLoop();
+  }
+
+  window.onload = function() {
+    loadPlayerData().then(tryStartGame);
+  };
+
+})();
+</script>
+</body>
+</html>
