@@ -150,14 +150,14 @@
     let img = new Image();
     img.onload = onSpriteLoad;
     img.onerror = onSpriteLoad;
-    img.src = new URL('/ActorA_idle_' + i + '.png', import.meta.url).href;
+    img.src = './ActorA_idle_' + i + '.png';
     idleFrames.push(img);
   }
   for (let i = 1; i <= 8; i++) {
     let img = new Image();
     img.onload = onSpriteLoad;
     img.onerror = onSpriteLoad;
-    img.src = new URL('/ActorA_move_' + i + '.png', import.meta.url).href;
+    img.src = './ActorA_move_' + i + '.png';
     moveFrames.push(img);
   }
 
