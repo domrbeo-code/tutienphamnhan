@@ -236,7 +236,7 @@
   const loadingOverlay = document.getElementById('loadingOverlay');
 
   let myPlayerId = null;
-  let playerData = null;
+  let myPlayerName = 'Vô Danh';
   let allBinData = null;
 
   const player = {
@@ -251,12 +251,37 @@
 
   /* ================= MULTIPLAYER STATE ================= */
   let otherPlayers = {};
-  const SYNC_INTERVAL = 2000;
+  const SYNC_INTERVAL = 1500;
   const STALE_TIMEOUT = 10000;
   let syncInProgress = false;
-  let lastSentX = -999;
-  let lastSentY = -999;
-  let lastSentMoving = false;
+
+  /* ================= UNIQUE PLAYER ID ================= */
+  function generateId() {
+    return 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 8);
+  }
+
+  function getOrCreatePlayerId() {
+    var stored = localStorage.getItem('bicanh_player_id');
+    if (stored && stored.length > 5) return stored;
+    var newId = generateId();
+    localStorage.setItem('bicanh_player_id', newId);
+    return newId;
+  }
+
+  function getOrCreatePlayerName() {
+    var stored = localStorage.getItem('bicanh_player_name');
+    if (stored) return stored;
+    var params = new URLSearchParams(window.location.search);
+    var fromUrl = params.get('name');
+    if (fromUrl) {
+      localStorage.setItem('bicanh_player_name', fromUrl);
+      return fromUrl;
+    }
+    var names = ['Thanh Tùng', 'Minh Đức', 'Hoài Nam', 'Phương Vy', 'Quang Huy', 'Thúy Hà', 'Bảo Trân', 'Khôi Nguyên'];
+    var randomName = names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 100);
+    localStorage.setItem('bicanh_player_name', randomName);
+    return randomName;
+  }
 
   /* ================= ASSET LOADING ================= */
   let idleFrames = [];
@@ -302,7 +327,7 @@
   let velocityY = 0;
   let isGrounded = true;
 
-  /* ================= JSONBIN FUNCTIONS ================= */
+  /* ================= JSONBIN HELPERS ================= */
   function fetchWithTimeout(url, options, timeoutMs) {
     timeoutMs = timeoutMs || 8000;
     return Promise.race([
@@ -313,88 +338,66 @@
     ]);
   }
 
-  async function loadPlayerData() {
-    const params = new URLSearchParams(window.location.search);
-    myPlayerId = params.get('pid') || '';
+  function extractRecord(data) {
+    if (data && typeof data === 'object' && 'record' in data && 'metadata' in data) return data.record;
+    return data;
+  }
 
-    if (!myPlayerId) {
-      loadingOverlay.textContent = 'Không tìm thấy Mã Đạo Hữu. Vui lòng quay lại từ game chính.';
-      return;
-    }
+  /* ================= INIT PLAYER ON SERVER ================= */
+  async function initPlayerOnServer() {
+    myPlayerId = getOrCreatePlayerId();
+    myPlayerName = getOrCreatePlayerName();
 
     try {
-      const res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
+      var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
         method: 'GET',
         headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
       }, 8000);
 
       if (!res.ok) throw new Error('HTTP ' + res.status);
 
-      const data = await res.json();
-      const record = (data && typeof data === 'object' && 'record' in data && 'metadata' in data) ? data.record : data;
+      var data = await res.json();
+      var record = extractRecord(data);
 
       if (!record || typeof record !== 'object' || Array.isArray(record)) {
-        loadingOverlay.textContent = 'Dữ liệu máy chủ không hợp lệ.';
-        return;
+        record = {};
       }
+
+      if (!record.players || typeof record.players !== 'object' || Array.isArray(record.players)) {
+        record.players = {};
+      }
+
+      var existing = record.players[myPlayerId];
+      if (existing && typeof existing.bicanhX === 'number') {
+        player.x = existing.bicanhX;
+      }
+      if (existing && typeof existing.bicanhY === 'number') {
+        player.y = existing.bicanhY;
+      }
+
+      var now = Date.now();
+      record.players[myPlayerId] = {
+        bicanhX: Math.round(player.x),
+        bicanhY: Math.round(player.y),
+        bicanhFacingLeft: player.facingLeft,
+        bicanhMoving: false,
+        bicanhLastSeen: now,
+        name: myPlayerName
+      };
 
       allBinData = record;
-      allBinData.players = allBinData.players || {};
 
-      const snap = allBinData.players[myPlayerId];
-      if (!snap) {
-        loadingOverlay.textContent = 'Không tìm thấy đạo hữu với mã "' + myPlayerId + '".';
-        return;
-      }
-
-      playerData = snap;
-
-      if (typeof snap.bicanhX === 'number') player.x = snap.bicanhX;
-      if (typeof snap.bicanhY === 'number') player.y = snap.bicanhY;
+      await fetchWithTimeout(JSONBIN_BASE, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+        body: JSON.stringify(record)
+      }, 8000);
 
       loadingOverlay.classList.add('hidden');
       updateStatusDisplay();
     } catch (err) {
-      loadingOverlay.textContent = 'Lỗi kết nối Vân Đài Ký Sự: ' + (err && err.message);
+      loadingOverlay.textContent = 'Lỗi kết nối: ' + (err && err.message);
     }
-  }
-
-  async function savePlayerData() {
-    if (!myPlayerId || !allBinData) return;
-
-    btnLeave.disabled = true;
-    btnLeave.textContent = 'Đang lưu...';
-    if (btnLeaveMobile) btnLeaveMobile.textContent = 'Đang lưu...';
-
-    try {
-      allBinData.players = allBinData.players || {};
-      allBinData.players[myPlayerId] = allBinData.players[myPlayerId] || {};
-      allBinData.players[myPlayerId].bicanhX = Math.round(player.x);
-      allBinData.players[myPlayerId].bicanhY = Math.round(player.y);
-      allBinData.players[myPlayerId].bicanhLastSeen = 0;
-
-      const res = await fetchWithTimeout(JSONBIN_BASE, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
-        body: JSON.stringify(allBinData),
-        keepalive: true
-      }, 8000);
-
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-
-      btnLeave.textContent = 'Đã lưu!';
-      if (btnLeaveMobile) btnLeaveMobile.textContent = 'Đã lưu!';
-    } catch (err) {
-      btnLeave.textContent = 'Lỗi lưu!';
-      btnLeave.disabled = false;
-      if (btnLeaveMobile) btnLeaveMobile.textContent = 'Lỗi lưu!';
-      console.error('savePlayerData error:', err);
-      return;
-    }
-
-    setTimeout(function() {
-      window.location.href = 'index.html';
-    }, 300);
   }
 
   /* ================= MULTIPLAYER SYNC ================= */
@@ -410,18 +413,20 @@
       if (!res.ok) { syncInProgress = false; return; }
 
       var data = await res.json();
-      var record = (data && typeof data === 'object' && 'record' in data && 'metadata' in data) ? data.record : data;
+      var record = extractRecord(data);
       if (!record || typeof record !== 'object' || Array.isArray(record)) { syncInProgress = false; return; }
 
-      allBinData = record;
-      allBinData.players = allBinData.players || {};
+      if (!record.players || typeof record.players !== 'object' || Array.isArray(record.players)) {
+        record.players = {};
+      }
 
       var now = Date.now();
 
+      /* --- Update other players from server data --- */
       var newOthers = {};
-      for (var pid in allBinData.players) {
+      for (var pid in record.players) {
         if (pid === myPlayerId) continue;
-        var p = allBinData.players[pid];
+        var p = record.players[pid];
         if (!p || typeof p.bicanhX !== 'number' || typeof p.bicanhY !== 'number') continue;
         var lastSeen = p.bicanhLastSeen || 0;
         if (lastSeen > 0 && now - lastSeen > STALE_TIMEOUT) continue;
@@ -441,29 +446,22 @@
       }
       otherPlayers = newOthers;
 
-      var px = Math.round(player.x);
-      var py = Math.round(player.y);
-      var pmoving = player.isMoving;
+      /* --- Update ONLY my own entry, preserve everyone else --- */
+      record.players[myPlayerId] = {
+        bicanhX: Math.round(player.x),
+        bicanhY: Math.round(player.y),
+        bicanhFacingLeft: player.facingLeft,
+        bicanhMoving: player.isMoving,
+        bicanhLastSeen: now,
+        name: myPlayerName
+      };
 
-      allBinData.players[myPlayerId] = allBinData.players[myPlayerId] || {};
-      allBinData.players[myPlayerId].bicanhX = px;
-      allBinData.players[myPlayerId].bicanhY = py;
-      allBinData.players[myPlayerId].bicanhFacingLeft = player.facingLeft;
-      allBinData.players[myPlayerId].bicanhMoving = pmoving;
-      allBinData.players[myPlayerId].bicanhLastSeen = now;
-
-      if (playerData && playerData.name) {
-        allBinData.players[myPlayerId].name = playerData.name;
-      }
-
-      lastSentX = px;
-      lastSentY = py;
-      lastSentMoving = pmoving;
+      allBinData = record;
 
       await fetchWithTimeout(JSONBIN_BASE, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
-        body: JSON.stringify(allBinData)
+        body: JSON.stringify(record)
       }, 8000);
     } catch (err) {
       console.error('syncWithServer error:', err);
@@ -472,41 +470,63 @@
     syncInProgress = false;
   }
 
-  /* ================= STATUS DISPLAY ================= */
-  function updateStatusDisplay() {
-    if (!playerData) {
-      statusEl.innerHTML = '';
+  /* ================= LEAVE BÍ CẢNH ================= */
+  async function leaveBicanh() {
+    if (!myPlayerId) return;
+
+    btnLeave.disabled = true;
+    btnLeave.textContent = 'Đang lưu...';
+    if (btnLeaveMobile) btnLeaveMobile.textContent = 'Đang lưu...';
+
+    try {
+      var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
+        method: 'GET',
+        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+      }, 8000);
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      var data = await res.json();
+      var record = extractRecord(data);
+      if (!record || typeof record !== 'object' || Array.isArray(record)) record = {};
+      if (!record.players || typeof record.players !== 'object') record.players = {};
+
+      record.players[myPlayerId] = record.players[myPlayerId] || {};
+      record.players[myPlayerId].bicanhX = Math.round(player.x);
+      record.players[myPlayerId].bicanhY = Math.round(player.y);
+      record.players[myPlayerId].bicanhLastSeen = 0;
+      record.players[myPlayerId].name = myPlayerName;
+
+      await fetchWithTimeout(JSONBIN_BASE, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+        body: JSON.stringify(record),
+        keepalive: true
+      }, 8000);
+
+      btnLeave.textContent = 'Đã lưu!';
+      if (btnLeaveMobile) btnLeaveMobile.textContent = 'Đã lưu!';
+    } catch (err) {
+      btnLeave.textContent = 'Lỗi lưu!';
+      btnLeave.disabled = false;
+      if (btnLeaveMobile) btnLeaveMobile.textContent = 'Lỗi lưu!';
+      console.error('leaveBicanh error:', err);
       return;
     }
 
-    var name = playerData.name || 'Vô Danh';
-    var realmIdx = playerData.realmIdx || 0;
-    var subIdx = playerData.subIdx || 0;
-    var tang = playerData.tang || 1;
-    var cp = playerData.combatPower || playerData.power || 0;
-    var hp = playerData.hp || 0;
-    var atk = playerData.atk || 0;
-    var def = playerData.def || 0;
+    setTimeout(function() {
+      window.location.href = 'index.html';
+    }, 300);
+  }
 
-    var realmNames = [
-      'Luyện Khí', 'Trúc Cơ', 'Kim Đan', 'Nguyên Anh',
-      'Hóa Thần', 'Luyện Hư', 'Hợp Thể', 'Đại Thừa',
-      'Độ Kiếp', 'Tiên Nhân'
-    ];
-    var subNames = ['Sơ Kỳ', 'Trung Kỳ', 'Hậu Kỳ', 'Viên Mãn'];
-
-    var realmName = (realmNames[realmIdx] || 'Luyện Khí') + ' - ' + (subNames[subIdx] || 'Sơ Kỳ') + ' T' + tang;
-
+  /* ================= STATUS DISPLAY ================= */
+  function updateStatusDisplay() {
     statusEl.innerHTML =
-      '<span class="player-name">' + name + '</span>' +
-      '<br><span class="stat-line">' + realmName + ' · Lực Chiến: ' + cp + ' · HP: ' + hp + ' · ATK: ' + atk + ' · DEF: ' + def + '</span>';
+      '<span class="player-name">' + myPlayerName + '</span>' +
+      '<br><span class="stat-line">ID: ' + myPlayerId.substr(0, 12) + '... · Đạo hữu online: 1</span>';
   }
 
   /* ================= INPUT HANDLING ================= */
-  function setKey(key, val) {
-    keys[key] = val;
-  }
-
   document.addEventListener('keydown', function(e) {
     var key = e.key.toLowerCase();
     keys[key] = true;
@@ -694,7 +714,6 @@
       if (drawX < -SPRITE_W || drawX > canvas.width) continue;
 
       drawNameLabel(drawX, drawY, p.name, '#8a9aca');
-
       var frame = p.currentFrames[p.frameIndex];
       drawSprite(frame, drawX, drawY, p.facingLeft);
     }
@@ -706,10 +725,7 @@
     var frame = currentFrames[frameIndex];
 
     drawSprite(frame, drawX, drawY, player.facingLeft);
-
-    if (playerData && playerData.name) {
-      drawNameLabel(drawX, drawY, playerData.name, '#e8c27a');
-    }
+    drawNameLabel(drawX, drawY, myPlayerName, '#e8c27a');
   }
 
   function drawHUD(cameraX) {
@@ -734,41 +750,23 @@
   }
 
   /* ================= INIT ================= */
-  btnLeave.addEventListener('click', function() {
-    savePlayerData();
-  });
+  btnLeave.addEventListener('click', function() { leaveBicanh(); });
   if (btnLeaveMobile) {
-    btnLeaveMobile.addEventListener('click', function() {
-      savePlayerData();
-    });
+    btnLeaveMobile.addEventListener('click', function() { leaveBicanh(); });
   }
 
   function tryStartGame() {
-    if (playerData && spritesReady) {
+    if (myPlayerId && spritesReady) {
       gameLoop();
       syncWithServer();
       setInterval(syncWithServer, SYNC_INTERVAL);
-    } else if (playerData && !spritesReady) {
+    } else if (myPlayerId && !spritesReady) {
       setTimeout(tryStartGame, 100);
     }
   }
 
   window.addEventListener('load', function() {
-    loadPlayerData().then(tryStartGame);
-  });
-
-  window.addEventListener('beforeunload', function() {
-    if (allBinData && myPlayerId && allBinData.players && allBinData.players[myPlayerId]) {
-      allBinData.players[myPlayerId].bicanhLastSeen = 0;
-      try {
-        fetch(JSONBIN_BASE, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
-          body: JSON.stringify(allBinData),
-          keepalive: true
-        });
-      } catch(e) {}
-    }
+    initPlayerOnServer().then(tryStartGame);
   });
 
 })();
