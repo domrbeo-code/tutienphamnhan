@@ -550,7 +550,10 @@
     color: var(--teal-soft); cursor:pointer;
   }
   .lb-refresh-btn:hover{ background: rgba(45,212,191,0.16); }
-  .lb-list{ max-height:50vh; overflow-y:auto; display:flex; flex-direction:column; gap:8px; }
+  .lb-list{ flex:1 1 auto; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-right:4px; }
+  .lb-list::-webkit-scrollbar{ width:5px; }
+  .lb-list::-webkit-scrollbar-track{ background:rgba(255,255,255,0.02); border-radius:3px; }
+  .lb-list::-webkit-scrollbar-thumb{ background:rgba(122,224,205,0.25); border-radius:3px; }
   .lb-row{
     display:flex; align-items:center; gap:10px;
     background: rgba(255,255,255,0.03); border:1px solid rgba(122,224,205,0.10);
@@ -6610,6 +6613,25 @@ if(nameInput) nameInput.addEventListener('keydown', function(e){
 });
 if(resumeIdInput) resumeIdInput.addEventListener('keydown', function(e){
   if(e.key === 'Enter') btnStart.click();
+});
+
+/* ---------- AUTO-REFRESH ON TAB FOCUS ---------- */
+var _lastFocusRefresh = 0;
+function _onFocusRefresh(){
+  if(!state || !myPlayerId) return;
+  var now = Date.now();
+  if(now - _lastFocusRefresh < 3000) return;
+  _lastFocusRefresh = now;
+  syncSave({force:true}).then(function(){
+    if(!el.leaderboardModal.classList.contains('hidden')) loadLeaderboard();
+  }).catch(function(){});
+}
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState === 'visible') _onFocusRefresh();
+});
+window.addEventListener('focus', _onFocusRefresh);
+window.addEventListener('pageshow', function(e){
+  if(e.persisted) _onFocusRefresh();
 });
 
 })();
