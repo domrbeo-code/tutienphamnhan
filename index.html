@@ -4436,8 +4436,10 @@ async function syncSave(opts){
   try{
     const all = opts.exit ? cachedBinData : await jsonbinReadAll();
     all.players = all.players || {};
+    const playerCountBefore = Object.keys(all.players).length;
     all.players[myPlayerId] = playerSnapshot();
     cachedBinData = all;
+    console.log('[Vân Đài] syncSave: GET -> merge my player -> PUT', { pid: myPlayerId, playerCountBefore: playerCountBefore, playerCountAfter: Object.keys(all.players).length, force: !!opts.force });
     await jsonbinWriteAll(all, opts.exit);
     lastSyncAt = Date.now();
     if(!opts.exit) setSyncStatus('ok');
@@ -5000,11 +5002,33 @@ async function tiThi(opponentId, opponentNameHint){
 
   updateUI();
 
-  all.players[myPlayerId] = playerSnapshot();
-  all.players[opponentId] = opp;
-  cachedBinData = all;
+  var freshAll;
   try{
-    await jsonbinWriteAll(all);
+    freshAll = await jsonbinReadAll();
+  }catch(err){
+    setSyncStatus('error', err && err.message);
+    addLogNode({type:'neutral', title:'Đồng Bộ Trễ Nghiệm', text:'Không thể ghi kết quả tỉ thí lên Vân Đài Ký Sự ngay lúc này, nhưng kết quả đã được ghi nhận cục bộ. Dữ liệu sẽ tự đồng bộ ở lần tiếp theo.', deltas:[]});
+    return;
+  }
+  freshAll.players = freshAll.players || {};
+  var freshOpp = freshAll.players[opponentId] || opp;
+  if(result.win){
+    var stolenAmt = stolen;
+    if(freshOpp.totalExpEarned !== undefined){
+      var maxSteal = Math.floor((freshOpp.totalExpEarned||0) * 0.10);
+      stolenAmt = Math.min(stolen, maxSteal);
+      freshOpp.totalExpEarned = Math.max(0, (freshOpp.totalExpEarned||0) - stolenAmt);
+      freshOpp.cultivation = Math.min(freshOpp.cultivation||0, freshOpp.totalExpEarned);
+    }
+    freshOpp.raidLog = (freshOpp.raidLog||[]).slice(-9);
+    freshOpp.raidLog.push({ by: state.name, amount: stolenAmt, at: new Date().toISOString(), type:'exp' });
+  }
+  freshAll.players[myPlayerId] = playerSnapshot();
+  freshAll.players[opponentId] = Object.assign({}, freshOpp, { updatedAt: new Date().toISOString() });
+  cachedBinData = freshAll;
+  console.log('[Vân Đài] tiThi: re-GET -> merge both players -> PUT', { myId: myPlayerId, opponentId: opponentId, playerCount: Object.keys(freshAll.players).length });
+  try{
+    await jsonbinWriteAll(freshAll);
     lastSyncAt = Date.now();
     setSyncStatus('ok');
   }catch(err){
