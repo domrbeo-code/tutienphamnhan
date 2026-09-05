@@ -814,6 +814,24 @@
     initPlayerOnServer().then(tryStartGame);
   });
 
+  /* ================= AUTO-REFRESH ON TAB FOCUS ================= */
+  var _lastFocusRefresh = 0;
+  function _onFocusRefresh(){
+    if(!myPlayerId) return;
+    var now = Date.now();
+    if(now - _lastFocusRefresh < 3000) return;
+    _lastFocusRefresh = now;
+    syncWithServer();
+    uploadMyPosition();
+  }
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState === 'visible') _onFocusRefresh();
+  });
+  window.addEventListener('focus', _onFocusRefresh);
+  window.addEventListener('pageshow', function(e){
+    if(e.persisted) _onFocusRefresh();
+  });
+
 })();
 </script>
 </body>
