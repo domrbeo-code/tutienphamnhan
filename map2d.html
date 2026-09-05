@@ -371,25 +371,26 @@
         record.players = {};
       }
 
-      var existing = record.players[myPlayerId];
-      if (existing && typeof existing.bicanhX === 'number') {
+      var existing = record.players[myPlayerId] || {};
+      if (typeof existing.bicanhX === 'number') {
         player.x = existing.bicanhX;
       }
-      if (existing && typeof existing.bicanhY === 'number') {
+      if (typeof existing.bicanhY === 'number') {
         player.y = existing.bicanhY;
       }
 
       var now = Date.now();
-      record.players[myPlayerId] = {
+      record.players[myPlayerId] = Object.assign({}, existing, {
         bicanhX: Math.round(player.x),
         bicanhY: Math.round(player.y),
         bicanhFacingLeft: player.facingLeft,
         bicanhMoving: false,
         bicanhLastSeen: now,
         name: myPlayerName
-      };
+      });
 
       allBinData = record;
+      console.log('[Bí Cảnh] initPlayerOnServer: GET -> merge bicanh fields -> PUT', { pid: myPlayerId, playerCount: Object.keys(record.players).length });
 
       await fetchWithTimeout(JSONBIN_BASE, {
         method: 'PUT',
@@ -418,14 +419,16 @@
       var record = extractRecord(data);
       if (!record || typeof record !== 'object' || Array.isArray(record)) { syncInProgress = false; return; }
       if (!record.players || typeof record.players !== 'object' || Array.isArray(record.players)) record.players = {};
-      record.players[myPlayerId] = {
+      var existingMe = record.players[myPlayerId] || {};
+      record.players[myPlayerId] = Object.assign({}, existingMe, {
         bicanhX: Math.round(player.x),
         bicanhY: Math.round(player.y),
         bicanhFacingLeft: player.facingLeft,
         bicanhMoving: player.isMoving,
         bicanhLastSeen: Date.now(),
         name: myPlayerName
-      };
+      });
+      console.log('[Bí Cảnh] uploadMyPosition: GET -> merge bicanh fields -> PUT', { pid: myPlayerId, playerCount: Object.keys(record.players).length });
       await fetchWithTimeout(JSONBIN_BASE, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
@@ -523,11 +526,14 @@
       if (!record || typeof record !== 'object' || Array.isArray(record)) record = {};
       if (!record.players || typeof record.players !== 'object') record.players = {};
 
-      record.players[myPlayerId] = record.players[myPlayerId] || {};
-      record.players[myPlayerId].bicanhX = Math.round(player.x);
-      record.players[myPlayerId].bicanhY = Math.round(player.y);
-      record.players[myPlayerId].bicanhLastSeen = 0;
-      record.players[myPlayerId].name = myPlayerName;
+      var existingMe = record.players[myPlayerId] || {};
+      record.players[myPlayerId] = Object.assign({}, existingMe, {
+        bicanhX: Math.round(player.x),
+        bicanhY: Math.round(player.y),
+        bicanhLastSeen: 0,
+        name: myPlayerName
+      });
+      console.log('[Bí Cảnh] leaveBicanh: GET -> merge bicanh fields -> PUT', { pid: myPlayerId, playerCount: Object.keys(record.players).length });
 
       await fetchWithTimeout(JSONBIN_BASE, {
         method: 'PUT',
