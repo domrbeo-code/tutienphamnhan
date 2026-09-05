@@ -254,33 +254,32 @@
   const SYNC_INTERVAL = 1500;
   const STALE_TIMEOUT = 10000;
   let syncInProgress = false;
+  let lastPositionUpload = 0;
+  const POSITION_UPLOAD_THROTTLE = 500;
+  let positionDirty = false;
 
-  /* ================= UNIQUE PLAYER ID ================= */
-  function generateId() {
-    return 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 8);
-  }
-
-  function getOrCreatePlayerId() {
-    var stored = localStorage.getItem('bicanh_player_id');
-    if (stored && stored.length > 5) return stored;
-    var newId = generateId();
-    localStorage.setItem('bicanh_player_id', newId);
-    return newId;
-  }
-
-  function getOrCreatePlayerName() {
-    var stored = localStorage.getItem('bicanh_player_name');
-    if (stored) return stored;
+  /* ================= PLAYER ID FROM URL (no random generation) ================= */
+  function getPlayerIdFromUrl() {
     var params = new URLSearchParams(window.location.search);
-    var fromUrl = params.get('name');
-    if (fromUrl) {
-      localStorage.setItem('bicanh_player_name', fromUrl);
-      return fromUrl;
-    }
-    var names = ['Thanh Tùng', 'Minh Đức', 'Hoài Nam', 'Phương Vy', 'Quang Huy', 'Thúy Hà', 'Bảo Trân', 'Khôi Nguyên'];
-    var randomName = names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 100);
-    localStorage.setItem('bicanh_player_name', randomName);
-    return randomName;
+    var pid = params.get('pid');
+    if (pid && pid.length > 3) return pid;
+    return null;
+  }
+
+  function fetchPlayerName(pid) {
+    return fetchWithTimeout(JSONBIN_BASE + '/latest', {
+      method: 'GET',
+      headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+    }, 8000).then(function(res) {
+      if (!res.ok) return 'Vô Danh';
+      return res.json().then(function(data) {
+        var record = extractRecord(data);
+        if (record && record.players && record.players[pid]) {
+          return record.players[pid].name || 'Vô Danh';
+        }
+        return 'Vô Danh';
+      });
+    }).catch(function() { return 'Vô Danh'; });
   }
 
   /* ================= ASSET LOADING ================= */
@@ -345,8 +344,13 @@
 
   /* ================= INIT PLAYER ON SERVER ================= */
   async function initPlayerOnServer() {
-    myPlayerId = getOrCreatePlayerId();
-    myPlayerName = getOrCreatePlayerName();
+    myPlayerId = getPlayerIdFromUrl();
+    if (!myPlayerId) {
+      loadingOverlay.textContent = 'Không tìm thấy Mã Đạo Hữu — đang chuyển về trang đăng nhập...';
+      setTimeout(function() { window.location.href = 'index.html'; }, 1500);
+      return;
+    }
+    myPlayerName = await fetchPlayerName(myPlayerId);
 
     try {
       var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
@@ -400,7 +404,47 @@
     }
   }
 
-  /* ================= MULTIPLAYER SYNC ================= */
+  /* ================= THROTTLED POSITION UPLOAD ================= */
+  async function uploadMyPosition() {
+    if (!myPlayerId || syncInProgress) return;
+    syncInProgress = true;
+    try {
+      var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
+        method: 'GET',
+        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+      }, 8000);
+      if (!res.ok) { syncInProgress = false; return; }
+      var data = await res.json();
+      var record = extractRecord(data);
+      if (!record || typeof record !== 'object' || Array.isArray(record)) { syncInProgress = false; return; }
+      if (!record.players || typeof record.players !== 'object' || Array.isArray(record.players)) record.players = {};
+      record.players[myPlayerId] = {
+        bicanhX: Math.round(player.x),
+        bicanhY: Math.round(player.y),
+        bicanhFacingLeft: player.facingLeft,
+        bicanhMoving: player.isMoving,
+        bicanhLastSeen: Date.now(),
+        name: myPlayerName
+      };
+      await fetchWithTimeout(JSONBIN_BASE, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+        body: JSON.stringify(record)
+      }, 8000);
+    } catch (err) { console.error('uploadMyPosition error:', err); }
+    syncInProgress = false;
+  }
+
+  function maybeUploadPosition() {
+    if (!player.isMoving) return;
+    var now = Date.now();
+    if (now - lastPositionUpload >= POSITION_UPLOAD_THROTTLE) {
+      lastPositionUpload = now;
+      uploadMyPosition();
+    }
+  }
+
+  /* ================= MULTIPLAYER SYNC (polling GET) ================= */
   async function syncWithServer() {
     if (!myPlayerId || syncInProgress) return;
     syncInProgress = true;
@@ -432,9 +476,13 @@
         if (lastSeen > 0 && now - lastSeen > STALE_TIMEOUT) continue;
 
         var existing = otherPlayers[pid];
+        var prevCurrentX = existing ? existing.currentX : p.bicanhX;
+        var prevCurrentY = existing ? existing.currentY : p.bicanhY;
         newOthers[pid] = {
-          x: p.bicanhX,
-          y: p.bicanhY,
+          targetX: p.bicanhX,
+          targetY: p.bicanhY,
+          currentX: prevCurrentX,
+          currentY: prevCurrentY,
           facingLeft: !!p.bicanhFacingLeft,
           isMoving: !!p.bicanhMoving,
           name: p.name || 'Vô Danh',
@@ -445,24 +493,8 @@
         };
       }
       otherPlayers = newOthers;
-
-      /* --- Update ONLY my own entry, preserve everyone else --- */
-      record.players[myPlayerId] = {
-        bicanhX: Math.round(player.x),
-        bicanhY: Math.round(player.y),
-        bicanhFacingLeft: player.facingLeft,
-        bicanhMoving: player.isMoving,
-        bicanhLastSeen: now,
-        name: myPlayerName
-      };
-
       allBinData = record;
-
-      await fetchWithTimeout(JSONBIN_BASE, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
-        body: JSON.stringify(record)
-      }, 8000);
+      updateStatusDisplay();
     } catch (err) {
       console.error('syncWithServer error:', err);
     }
@@ -521,9 +553,10 @@
 
   /* ================= STATUS DISPLAY ================= */
   function updateStatusDisplay() {
+    var onlineCount = Object.keys(otherPlayers).length + 1;
     statusEl.innerHTML =
       '<span class="player-name">' + myPlayerName + '</span>' +
-      '<br><span class="stat-line">ID: ' + myPlayerId.substr(0, 12) + '... · Đạo hữu online: 1</span>';
+      '<br><span class="stat-line">ID: ' + (myPlayerId || '').substr(0, 12) + '... · Đạo hữu online: ' + onlineCount + '</span>';
   }
 
   /* ================= INPUT HANDLING ================= */
@@ -692,9 +725,13 @@
     }
   }
 
-  function drawOtherPlayers(cameraX) {
+  var LERP_FACTOR = 0.15;
+
+  function updateRemotePlayers() {
     for (var pid in otherPlayers) {
       var p = otherPlayers[pid];
+      p.currentX += (p.targetX - p.currentX) * LERP_FACTOR;
+      p.currentY += (p.targetY - p.currentY) * LERP_FACTOR;
 
       var targetFrames = p.isMoving ? moveFrames : idleFrames;
       if (p.currentFrames !== targetFrames) {
@@ -707,9 +744,15 @@
         p.frameTimer = 0;
         p.frameIndex = (p.frameIndex + 1) % p.currentFrames.length;
       }
+    }
+  }
 
-      var drawX = p.x - cameraX;
-      var drawY = p.y;
+  function drawOtherPlayers(cameraX) {
+    for (var pid in otherPlayers) {
+      var p = otherPlayers[pid];
+
+      var drawX = p.currentX - cameraX;
+      var drawY = p.currentY;
 
       if (drawX < -SPRITE_W || drawX > canvas.width) continue;
 
@@ -745,6 +788,8 @@
 
   function gameLoop() {
     update();
+    updateRemotePlayers();
+    maybeUploadPosition();
     render();
     requestAnimationFrame(gameLoop);
   }
