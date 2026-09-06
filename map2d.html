@@ -251,11 +251,14 @@
 
   /* ================= MULTIPLAYER STATE ================= */
   let otherPlayers = {};
-  const SYNC_INTERVAL = 1500;
+  const SYNC_INTERVAL = 3000;
   const STALE_TIMEOUT = 10000;
   let syncInProgress = false;
   let lastPositionUpload = 0;
-  const POSITION_UPLOAD_THROTTLE = 500;
+  let lastUploadedX = -9999;
+  let lastUploadedY = -9999;
+  const POSITION_UPLOAD_THROTTLE = 2000;
+  const POSITION_MIN_DELTA = 5;
   let positionDirty = false;
 
   /* ================= PLAYER ID FROM URL (no random generation) ================= */
@@ -269,7 +272,7 @@
   function fetchPlayerName(pid) {
     return fetchWithTimeout(JSONBIN_BASE + '/latest', {
       method: 'GET',
-      headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+      headers: { 'X-Master-Key': JSONBIN_API_KEY }
     }, 8000).then(function(res) {
       if (!res.ok) return 'Vô Danh';
       return res.json().then(function(data) {
@@ -355,7 +358,7 @@
     try {
       var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
         method: 'GET',
-        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+        headers: { 'X-Master-Key': JSONBIN_API_KEY }
       }, 8000);
 
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -412,7 +415,7 @@
     try {
       var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
         method: 'GET',
-        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+        headers: { 'X-Master-Key': JSONBIN_API_KEY }
       }, 8000);
       if (!res.ok) { syncInProgress = false; return; }
       var data = await res.json();
@@ -441,8 +444,12 @@
   function maybeUploadPosition() {
     if (!player.isMoving) return;
     var now = Date.now();
-    if (now - lastPositionUpload >= POSITION_UPLOAD_THROTTLE) {
+    var dx = Math.abs(Math.round(player.x) - lastUploadedX);
+    var dy = Math.abs(Math.round(player.y) - lastUploadedY);
+    if (now - lastPositionUpload >= POSITION_UPLOAD_THROTTLE && (dx >= POSITION_MIN_DELTA || dy >= POSITION_MIN_DELTA)) {
       lastPositionUpload = now;
+      lastUploadedX = Math.round(player.x);
+      lastUploadedY = Math.round(player.y);
       uploadMyPosition();
     }
   }
@@ -455,7 +462,7 @@
     try {
       var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
         method: 'GET',
-        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+        headers: { 'X-Master-Key': JSONBIN_API_KEY }
       }, 8000);
       if (!res.ok) { syncInProgress = false; return; }
 
@@ -516,7 +523,7 @@
     try {
       var res = await fetchWithTimeout(JSONBIN_BASE + '/latest', {
         method: 'GET',
-        headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+        headers: { 'X-Master-Key': JSONBIN_API_KEY }
       }, 8000);
 
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -795,7 +802,6 @@
   function gameLoop() {
     update();
     updateRemotePlayers();
-    maybeUploadPosition();
     render();
     requestAnimationFrame(gameLoop);
   }
@@ -811,6 +817,7 @@
       gameLoop();
       syncWithServer();
       setInterval(syncWithServer, SYNC_INTERVAL);
+      setInterval(maybeUploadPosition, 1000);
     } else if (myPlayerId && !spritesReady) {
       setTimeout(tryStartGame, 100);
     }
